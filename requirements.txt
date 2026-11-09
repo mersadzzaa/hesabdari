@@ -1,7 +1,7 @@
-python-telegram-bot==20.7
-Flask==3.0.0
-psycopg2-binary==2.9.9
-jdatetime==4.1.1
-Pillow==10.1.0
-arabic-reshaper==3.0.0
-python-bidi==0.4.2
+python-telegram-bot>=20.7
+Flask>=3.0.0
+psycopg2-binary>=2.9.9
+jdatetime>=4.1.1
+Pillow>=10.3.0
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
