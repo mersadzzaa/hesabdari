@@ -4,6 +4,7 @@ import html
 import threading
 import psycopg2
 import jdatetime
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
@@ -19,6 +20,9 @@ TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DB_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
+
+# اختلاف زمانی ثابت تهران (ایران ساعت تابستانی ندارد: +03:30)
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 # ================= سرور زنده نگه‌دارنده =================
 web_app = Flask(__name__)
@@ -108,23 +112,38 @@ def delete_day_txs(date_str):
     cur.close()
     conn.close()
 
-# ================= توابع تاریخ و تقویم شمسی =================
+# ================= توابع تاریخ دقیق تهران =================
+def get_tehran_date():
+    """محاسبه دقیق تاریخ بر مبنای ساعت رسمی ایران"""
+    now_tehran = datetime.now(TEHRAN_TZ)
+    return jdatetime.date.fromgregorian(date=now_tehran.date())
+
 def get_today():
-    return jdatetime.date.today().strftime("%Y/%m/%d")
+    return get_tehran_date().strftime("%Y/%m/%d")
 
 def get_yesterday():
-    return (jdatetime.date.today() - jdatetime.timedelta(days=1)).strftime("%Y/%m/%d")
+    yesterday = get_tehran_date() - jdatetime.timedelta(days=1)
+    return yesterday.strftime("%Y/%m/%d")
 
 def format_price(amount):
     return f"{amount:,} تومان"
 
+def get_main_keyboard():
+    menu = [
+        ['📝 ثبت هزینه', '🧾 دریافت فاکتورها'],
+        ['➕ اضافه کردن به روز خاص', '🗑 مدیریت و حذف هزینه‌ها'],
+        ['❌ انصراف / منوی اصلی']
+    ]
+    return ReplyKeyboardMarkup(menu, resize_keyboard=True)
+
+# ================= کیبوردهای تقویم شیشه‌ای =================
 def make_years_keyboard(action_prefix):
-    """تولید دکمه‌های سال از ۱۴۰۲ تا ۱۴۱۰ در ردیف‌های ۳تایی"""
     years = [1402, 1403, 1404, 1405, 1406, 1407, 1408, 1409, 1410]
     rows = []
     for i in range(0, len(years), 3):
         row = [InlineKeyboardButton(f"سال {y}", callback_data=f"{action_prefix}_y:{y}") for y in years[i:i+3]]
         rows.append(row)
+    rows.append([InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")])
     return InlineKeyboardMarkup(rows)
 
 def make_months_keyboard(action_prefix, year):
@@ -138,6 +157,7 @@ def make_months_keyboard(action_prefix, year):
     for i in range(0, 12, 3):
         row = [InlineKeyboardButton(m[0], callback_data=f"{action_prefix}_m:{year}:{m[1]}") for m in months[i:i+3]]
         rows.append(row)
+    rows.append([InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")])
     return InlineKeyboardMarkup(rows)
 
 def make_days_keyboard(action_prefix, year, month):
@@ -159,9 +179,10 @@ def make_days_keyboard(action_prefix, year, month):
             row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")])
     return InlineKeyboardMarkup(rows)
 
-# ================= موتور ساخت فاکتور متنی و اکسل =================
+# ================= موتور ساخت فاکتور =================
 def generate_text_invoice(title_header, items, is_range=False):
     lines = [
         "🧾 <b>صورت‌حساب هزینه‌ها</b>",
@@ -240,22 +261,37 @@ def generate_excel_file(title_header, items, is_range=False):
     buf.seek(0)
     return buf
 
-# ================= هندلرهای ربات تلگرام =================
+# ================= هندلرهای ربات =================
 TITLE, AMOUNT = range(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    menu = [
-        ['📝 ثبت هزینه', '🧾 دریافت فاکتورها'],
-        ['➕ اضافه کردن به روز خاص', '🗑 مدیریت و حذف هزینه‌ها']
-    ]
-    markup = ReplyKeyboardMarkup(menu, resize_keyboard=True)
-    await update.message.reply_text("سلام رئیس! سیستم با تقویم تا سال ۱۴۱۰ و امکان ثبت در روز خاص آماده است.", reply_markup=markup)
+    context.user_data.clear()
+    await update.message.reply_text(
+        "سلام رئیس! سیستم با تاریخ دقیق ساعت تهران و دکمه‌های انصراف سریع آماده به کار است.",
+        reply_markup=get_main_keyboard()
+    )
+
+# --- تابع عمومی انصراف و بازگشت به منوی اصلی ---
+async def cancel_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    text = "عملیات لغو شد. به منوی اصلی برگشتید:"
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await context.bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=get_main_keyboard())
+    else:
+        await update.message.reply_text(text, reply_markup=get_main_keyboard())
+    return ConversationHandler.END
 
 # --- ثبت مرحله‌ای عادی ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    context.user_data['flow'] = None
+    context.user_data.clear()
     await update.message.reply_text("عنوان خرید یا هزینه را بنویسید (مثلاً: بنزین):")
     return TITLE
 
@@ -274,7 +310,8 @@ async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("امروز", callback_data="add_date_today"),
          InlineKeyboardButton("دیروز", callback_data="add_date_yesterday")],
-        [InlineKeyboardButton("📅 تاریخ دیگر (انتخاب تقویم)", callback_data="add_date_custom")]
+        [InlineKeyboardButton("📅 تاریخ دیگر (انتخاب تقویم)", callback_data="add_date_custom")],
+        [InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")]
     ]
     await update.message.reply_text("تاریخ انجام این هزینه را تعیین کنید:", reply_markup=InlineKeyboardMarkup(buttons))
     return ConversationHandler.END
@@ -317,14 +354,15 @@ def finalize_add(update, context, date_str):
     amount = context.user_data.get('temp_amount', 0)
     add_transaction(title, amount, date_str)
 
-# --- سیستم جدید: اضافه کردن هزینه به روز خاص (مشابه پنل حذف) ---
+# --- اضافه کردن هزینه به روز خاص ---
 async def add_to_specific_date_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    context.user_data['flow'] = None
+    context.user_data.clear()
     buttons = [
         [InlineKeyboardButton("امروز", callback_data="add_tgt_today"),
          InlineKeyboardButton("دیروز", callback_data="add_tgt_yesterday")],
-        [InlineKeyboardButton("📅 انتخاب روز دیگر از تقویم", callback_data="add_tgt_custom")]
+        [InlineKeyboardButton("📅 انتخاب روز دیگر از تقویم", callback_data="add_tgt_custom")],
+        [InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")]
     ]
     await update.message.reply_text("برای اضافه کردن هزینه، کدام روز را مد نظر دارید؟", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -361,20 +399,22 @@ async def prompt_for_custom_expense(query, context, date_str):
     context.user_data['flow'] = 'AWAIT_SPECIFIC_TITLE'
     await query.edit_message_text(
         f"🗓 <b>تاریخ انتخابی:</b> <code>{date_str}</code>\n\n"
-        f"لطفاً <b>عنوان خرید یا هزینه</b> را بفرستید:",
+        f"لطفاً <b>عنوان خرید یا هزینه</b> را بفرستید:\n"
+        f"(یا دکمه انصراف را بزنید)",
         parse_mode="HTML"
     )
 
-# --- منوی فاکتورها (حل کامل باگ دکمه‌های سال) ---
+# --- منوی فاکتورها ---
 async def report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    context.user_data['flow'] = None
+    context.user_data.clear()
     buttons = [
         [InlineKeyboardButton("📄 فاکتور امروز", callback_data="rep_today"),
          InlineKeyboardButton("📄 فاکتور دیروز", callback_data="rep_yesterday")],
         [InlineKeyboardButton("🗓 فاکتور یک ماه کامل", callback_data="rep_month_start")],
         [InlineKeyboardButton("📅 فاکتور یک روز مشخص", callback_data="rep_day_start")],
-        [InlineKeyboardButton("⏳ بازه زمانی دلخواه (از تا)", callback_data="rep_range_start")]
+        [InlineKeyboardButton("⏳ بازه زمانی دلخواه (از تا)", callback_data="rep_range_start")],
+        [InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")]
     ]
     await update.message.reply_text("نوع فاکتور مورد نظرتان را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -401,9 +441,10 @@ async def show_date_report(query, date_str):
         await query.edit_message_text(f"در تاریخ {date_str} هیچ هزینه‌ای ثبت نشده است.")
         return
     text = generate_text_invoice(date_str, rows, is_range=False)
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_day:{date_str}")
-    ]])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_day:{date_str}")],
+        [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
+    ])
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -431,9 +472,10 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(f"در ماه {y}/{m} هیچ خریدی ثبت نشده است.")
             return
         text = generate_text_invoice(f"ماه {y}/{m}", rows, is_range=True)
-        markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_mon:{y}:{m}")
-        ]])
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_mon:{y}:{m}")],
+            [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
+        ])
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
     elif data.startswith("rep_rng_y:"):
@@ -457,9 +499,10 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
                 await query.edit_message_text(f"هیچ هزینه‌ای بین {start_d} تا {end_d} ثبت نشده است.")
                 return
             text = generate_text_invoice(f"از {start_d} تا {end_d}", rows, is_range=True)
-            markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_rng:{start_d}:{end_d}")
-            ]])
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_rng:{start_d}:{end_d}")],
+                [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
+            ])
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 # --- دانلود فایل اکسل ---
@@ -496,11 +539,12 @@ async def handle_excel_download(update: Update, context: ContextTypes.DEFAULT_TY
 # --- سیستم مدیریت و حذف هزینه‌ها ---
 async def delete_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    context.user_data['flow'] = None
+    context.user_data.clear()
     buttons = [
         [InlineKeyboardButton("امروز", callback_data="del_check_today"),
          InlineKeyboardButton("دیروز", callback_data="del_check_yesterday")],
-        [InlineKeyboardButton("📅 انتخاب روز دیگر", callback_data="del_check_custom")]
+        [InlineKeyboardButton("📅 انتخاب روز دیگر", callback_data="del_check_custom")],
+        [InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")]
     ]
     await update.message.reply_text("برای مدیریت و حذف، کدام روز را می‌خواهید بررسی کنید؟", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -543,6 +587,7 @@ async def show_day_items_for_deletion(query, date_str):
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"del_item:{tx_id}:{date_str}")])
 
     buttons.append([InlineKeyboardButton("🔥 حذف کامل تمام هزینه‌های این روز", callback_data=f"del_all:{date_str}")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="cancel_to_main")])
     
     await query.edit_message_text(
         f"لیست هزینه‌های تاریخ {date_str}:\nبرای حذف هر قلم، روی آن کلیک کنید:",
@@ -563,13 +608,19 @@ async def handle_deletion_action(update: Update, context: ContextTypes.DEFAULT_T
         delete_day_txs(date_str)
         await query.edit_message_text(f"🗑 تمام هزینه‌های تاریخ {date_str} به طور کامل پاک شدند.")
 
-# --- مدیریت پیام‌های متنی (ثبت سریع یا دریافت اطلاعات ثبت روز خاص) ---
+# --- مدیریت پیام‌های متنی ---
 async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    flow = context.user_data.get('flow')
     text = update.message.text.strip()
 
-    # ۱. مرحله دریافت عنوان برای روز خاص
+    # انصراف سریع با ارسال متن یا زدن دکمه کیبورد
+    if text in ["❌ انصراف / منوی اصلی", "انصراف", "منوی اصلی", "/cancel"]:
+        await cancel_all(update, context)
+        return
+
+    flow = context.user_data.get('flow')
+
+    # ۱. دریافت عنوان برای روز خاص
     if flow == 'AWAIT_SPECIFIC_TITLE':
         context.user_data['specific_title'] = text
         context.user_data['flow'] = 'AWAIT_SPECIFIC_AMOUNT'
@@ -579,7 +630,7 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # ۲. مرحله دریافت مبلغ برای روز خاص
+    # ۲. دریافت مبلغ برای روز خاص
     elif flow == 'AWAIT_SPECIFIC_AMOUNT':
         val = text.replace(',', '')
         if not val.isdigit():
@@ -591,25 +642,26 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_date = context.user_data.get('target_date', get_today())
 
         add_transaction(title, amount, target_date)
-        context.user_data['flow'] = None
+        context.user_data.clear()
 
         await update.message.reply_text(
             f"✅ هزینه با موفقیت ثبت شد!\n"
             f"🛒 شرح: <b>{html.escape(title)}</b>\n"
             f"💰 مبلغ: <code>{amount:,}</code> تومان\n"
             f"📅 تاریخ: <code>{target_date}</code>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
         )
         return
 
-    # ۳. ثبت سریع (Fast Track با الگو: عنوان - مبلغ)
+    # ۳. ثبت سریع (Fast Track)
     match = re.match(r'^(.*?)\s*-\s*([\d,]+)$', text)
     if match:
         title = match.group(1).strip()
         amount = int(match.group(2).replace(',', ''))
         date_str = get_today()
         add_transaction(title, amount, date_str)
-        await update.message.reply_text(f"⚡️ سریع ثبت شد!\n🛒 {title}\n💰 {format_price(amount)}\n📅 امروز")
+        await update.message.reply_text(f"⚡️ سریع ثبت شد!\n🛒 {title}\n💰 {format_price(amount)}\n📅 امروز ({date_str})")
 
 # ================= اجرای برنامه =================
 def main():
@@ -625,22 +677,30 @@ def main():
             TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
             AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_amount)]
         },
-        fallbacks=[]
+        fallbacks=[
+            CommandHandler('cancel', cancel_all),
+            MessageHandler(filters.Regex('^(❌ انصراف / منوی اصلی|انصراف|منوی اصلی)$'), cancel_all),
+            CallbackQueryHandler(cancel_all, pattern='^cancel_to_main$')
+        ]
     )
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("cancel", cancel_all))
     application.add_handler(conv_handler)
     
+    # دکمه انصراف کلی برای تمام منوهای شیشه‌ای
+    application.add_handler(CallbackQueryHandler(cancel_all, pattern='^cancel_to_main$'))
+
     # ثبت عادی تقویم
     application.add_handler(CallbackQueryHandler(handle_add_date_buttons, pattern='^add_date_'))
     application.add_handler(CallbackQueryHandler(handle_add_calendar, pattern='^add_cal_'))
     
-    # بخش جدید: اضافه کردن به روز خاص
+    # اضافه کردن به روز خاص
     application.add_handler(MessageHandler(filters.Regex('^➕ اضافه کردن به روز خاص$'), add_to_specific_date_menu))
     application.add_handler(CallbackQueryHandler(handle_add_target_selection, pattern='^add_tgt_(today|yesterday|custom)$'))
     application.add_handler(CallbackQueryHandler(handle_add_target_calendar, pattern='^add_tgt_cal_'))
     
-    # فاکتورها (الگوی دقیق برای جلوگیری از تداخل کلیدهای سال)
+    # فاکتورها
     application.add_handler(MessageHandler(filters.Regex('^🧾 دریافت فاکتورها$'), report_menu))
     application.add_handler(CallbackQueryHandler(handle_reports, pattern='^rep_(today|yesterday|month_start|day_start|range_start)$'))
     application.add_handler(CallbackQueryHandler(handle_report_calendar, pattern='^rep_(day|mon|rng)_'))
