@@ -24,13 +24,38 @@ PORT = int(os.environ.get("PORT", 8080))
 FONT_PATH = "Vazirmatn-Regular.ttf"
 
 def ensure_font():
-    """دانلود خودکار فونت فارسی در صورت عدم وجود روی سرور"""
-    if not os.path.exists(FONT_PATH):
-        url = "https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/ttf/Vazirmatn-Regular.ttf"
+    """دانلود فونت استاندارد با بررسی سلامت کامل فایل و جلوگیری از دانلود ناقص"""
+    if not os.path.exists(FONT_PATH) or os.path.getsize(FONT_PATH) < 20000:
+        url = "https://raw.githubusercontent.com/rastikerdar/vazirmatn/master/fonts/ttf/Vazirmatn-Regular.ttf"
         try:
-            urllib.request.urlretrieve(url, FONT_PATH)
+            req = urllib.request.Request(
+                url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            with urllib.request.urlopen(req) as resp, open(FONT_PATH, 'wb') as f:
+                f.write(resp.read())
         except Exception as e:
             print(f"Error downloading font: {e}")
+
+# پیکربندی حرفه‌ای موتور تغییر شکل حروف فارسی
+reshaper = arabic_reshaper.ArabicReshaper(
+    configuration={
+        'delete_harakat': False,
+        'support_ligatures': True,
+        'support_zwj': True,
+        'use_unshaped_instead_of_isolated': True
+    }
+)
+
+def fix_text(text):
+    """اصلاح جهت و اتصال حروف فارسی بدون به‌هم‌ریختگی"""
+    if not text:
+        return ""
+    # رفع مشکل نیم‌فاصله‌ها و کاراکترهای ناسازگار
+    cleaned = str(text).replace('\u200c', ' ').strip()
+    reshaped = reshaper.reshape(cleaned)
+    # جهت‌دهی قطعی راست‌به‌چپ (RTL)
+    return get_display(reshaped, base_dir='R')
 
 # ================= سرور زنده نگه‌دارنده =================
 web_app = Flask(__name__)
@@ -130,11 +155,6 @@ def get_yesterday():
 def format_price(amount):
     return f"{amount:,} تومان"
 
-def fix_text(text):
-    reshaped = arabic_reshaper.reshape(str(text))
-    return get_display(reshaped)
-
-# کلیدهای تقویم شیشه‌ای
 def make_years_keyboard(action_prefix):
     current_y = jdatetime.date.today().year
     years = [current_y - 1, current_y, current_y + 1]
@@ -175,12 +195,8 @@ def make_days_keyboard(action_prefix, year, month):
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-# ================= موتور ساخت فاکتور PDF =================
+# ================= موتور ساخت فاکتور PDF (کاملاً اصلاح‌شده) =================
 def create_pdf_invoice(title_header, items, is_range=False):
-    """
-    تولید فایل رسمی PDF بر اساس اندازه A4
-    items: لیست تاپل‌های اطلاعات
-    """
     page_width, page_height = 1240, 1754
     image = Image.new('RGB', (page_width, page_height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
@@ -191,22 +207,25 @@ def create_pdf_invoice(title_header, items, is_range=False):
     font_regular = ImageFont.truetype(FONT_PATH, 24)
 
     # سربرگ سرمه‌ای
-    draw.rectangle([(50, 50), (1190, 160)], fill=(30, 41, 59))
-    draw.text((page_width / 2, 85), fix_text("صورت‌حساب رسمی هزینه‌ها"), fill=(255, 255, 255), font=font_large, anchor="mm")
+    draw.rectangle([(60, 50), (1180, 160)], fill=(30, 41, 59))
+    draw.text((page_width / 2, 85), fix_text("صورت حساب هزینه ها"), fill=(255, 255, 255), font=font_large, anchor="mm")
     
-    # کادر تاریخ/گزارش
-    draw.text((1150, 200), fix_text(f"بازه گزارش: {title_header}"), fill=(70, 70, 70), font=font_bold, anchor="rt")
+    # کادر تاریخ/گزارش (جدا کردن متن فارسی از تاریخ برای جلوگیری از به‌هم‌ریختگی)
+    report_label = fix_text("بازه گزارش:")
+    draw.text((1140, 200), report_label, fill=(70, 70, 70), font=font_bold, anchor="rt")
+    # چاپ تاریخ بدون وارونه شدن اسلش‌ها
+    draw.text((950, 200), str(title_header), fill=(30, 41, 59), font=font_bold, anchor="lt")
     
     # سربرگ جدول
-    draw.rectangle([(50, 250), (1190, 310)], fill=(226, 232, 240))
-    draw.text((1140, 268), fix_text("ردیف"), fill=(15, 23, 42), font=font_bold, anchor="rt")
-    draw.text((850, 268), fix_text("شرح کالا / خدمات"), fill=(15, 23, 42), font=font_bold, anchor="rt")
+    draw.rectangle([(60, 260), (1180, 320)], fill=(226, 232, 240))
+    draw.text((1140, 278), fix_text("ردیف"), fill=(15, 23, 42), font=font_bold, anchor="rt")
+    draw.text((950, 278), fix_text("شرح کالا و خدمات"), fill=(15, 23, 42), font=font_bold, anchor="rt")
     if is_range:
-        draw.text((500, 268), fix_text("تاریخ"), fill=(15, 23, 42), font=font_bold, anchor="rt")
-    draw.text((100, 268), fix_text("مبلغ (تومان)"), fill=(15, 23, 42), font=font_bold, anchor="lt")
+        draw.text((550, 278), fix_text("تاریخ"), fill=(15, 23, 42), font=font_bold, anchor="rt")
+    draw.text((100, 278), fix_text("مبلغ (تومان)"), fill=(15, 23, 42), font=font_bold, anchor="lt")
 
     # سطرهای جدول
-    y = 330
+    y = 345
     total_amount = 0
     for idx, item in enumerate(items):
         if is_range:
@@ -217,13 +236,20 @@ def create_pdf_invoice(title_header, items, is_range=False):
 
         # رنگ سطر یک‌درمیان
         if idx % 2 == 1:
-            draw.rectangle([(50, y - 10), (1190, y + 45)], fill=(248, 250, 252))
+            draw.rectangle([(60, y - 10), (1180, y + 45)], fill=(248, 250, 252))
 
-        draw.text((1140, y), fix_text(str(idx + 1)), fill=(50, 50, 50), font=font_regular, anchor="rt")
-        draw.text((850, y), fix_text(title), fill=(30, 30, 30), font=font_regular, anchor="rt")
+        # ردیف
+        draw.text((1130, y), str(idx + 1), fill=(70, 70, 70), font=font_regular, anchor="rt")
+        
+        # شرح کالا
+        draw.text((950, y), fix_text(title), fill=(30, 30, 30), font=font_regular, anchor="rt")
+        
+        # تاریخ (فقط برای بازه‌ها)
         if is_range:
-            draw.text((500, y), fix_text(date_val), fill=(70, 70, 70), font=font_regular, anchor="rt")
-        draw.text((100, y), fix_text(format_price(amount)), fill=(16, 120, 50), font=font_bold, anchor="lt")
+            draw.text((520, y), str(date_val), fill=(70, 70, 70), font=font_regular, anchor="rt")
+            
+        # مبلغ
+        draw.text((100, y), f"{amount:,}", fill=(16, 120, 50), font=font_bold, anchor="lt")
 
         total_amount += amount
         y += 55
@@ -231,13 +257,18 @@ def create_pdf_invoice(title_header, items, is_range=False):
             break
 
     # خط پایان جدول و جمع کل
-    draw.line([(50, y + 20), (1190, y + 20)], fill=(148, 163, 184), width=2)
+    draw.line([(60, y + 20), (1180, y + 20)], fill=(148, 163, 184), width=2)
     y += 50
-    draw.rectangle([(50, y), (1190, y + 80)], fill=(241, 245, 249))
-    draw.text((1140, y + 25), fix_text("جمع کل هزینه‌ها:"), fill=(15, 23, 42), font=font_bold, anchor="rt")
-    draw.text((100, y + 25), fix_text(format_price(total_amount)), fill=(185, 28, 28), font=font_large, anchor="lt")
+    draw.rectangle([(60, y), (1180, y + 80)], fill=(241, 245, 249))
+    
+    draw.text((1140, y + 25), fix_text("جمع کل هزینه ها:"), fill=(15, 23, 42), font=font_bold, anchor="rt")
+    
+    # مبلغ نهایی با واحد تومان
+    total_str = f"{total_amount:,} "
+    draw.text((100, y + 25), total_str, fill=(185, 28, 28), font=font_large, anchor="lt")
+    draw.text((100 + draw.textlength(total_str, font=font_large) + 10, y + 33), fix_text("تومان"), fill=(185, 28, 28), font=font_bold, anchor="lt")
 
-    # ذخیره به فرمت فایل PDF
+    # ذخیره با کیفیت بسیار بالا به صورت PDF
     pdf_buffer = BytesIO()
     image.save(pdf_buffer, format="PDF", resolution=150.0)
     pdf_buffer.seek(0)
@@ -281,7 +312,6 @@ async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تاریخ انجام این هزینه را تعیین کنید:", reply_markup=InlineKeyboardMarkup(buttons))
     return ConversationHandler.END
 
-# ذخیره ثبت هزینه پس از انتخاب تاریخ
 async def handle_add_date_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -298,7 +328,6 @@ async def handle_add_date_buttons(update: Update, context: ContextTypes.DEFAULT_
     elif data == "add_date_custom":
         await query.edit_message_text("سال مورد نظر را انتخاب کنید:", reply_markup=make_years_keyboard("add_cal"))
 
-# مراحل تقویم ثبت هزینه
 async def handle_add_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -350,14 +379,13 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['range_mode'] = 'start'
         await query.edit_message_text("انتخاب «تاریخ شروع» بازه:\nسال را مشخص کنید:", reply_markup=make_years_keyboard("rep_rng"))
 
-# ارسال PDF برای یک روز مشخص
 async def send_date_pdf(query, context, date_str):
     rows = get_tx_by_date(date_str)
     if not rows:
         await query.edit_message_text(f"هیچ هزینه‌ای در تاریخ {date_str} یافت نشد.")
         return
     await query.edit_message_text("در حال آماده‌سازی فایل PDF ... ⏳")
-    pdf_file = create_pdf_invoice(f"روز {date_str}", rows, is_range=False)
+    pdf_file = create_pdf_invoice(f"{date_str}", rows, is_range=False)
     await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=pdf_file,
@@ -366,13 +394,11 @@ async def send_date_pdf(query, context, date_str):
     )
     await query.delete_message()
 
-# پیمایش تقویم گزارش‌ها
 async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # روز خاص
     if data.startswith("rep_day_y:"):
         y = data.split(":")[1]
         await query.edit_message_text("ماه را انتخاب کنید:", reply_markup=make_months_keyboard("rep_day", y))
@@ -383,7 +409,6 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
         _, y, m, d = data.split(":")
         await send_date_pdf(query, context, f"{y}/{m}/{d}")
 
-    # ماه خاص
     elif data.startswith("rep_mon_y:"):
         y = data.split(":")[1]
         await query.edit_message_text("ماه را انتخاب کنید:", reply_markup=make_months_keyboard("rep_mon", y))
@@ -394,7 +419,7 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(f"در ماه {y}/{m} هیچ خریدی ثبت نشده است.")
             return
         await query.edit_message_text("در حال رسم و ساخت فاکتور ماهانه PDF ... ⏳")
-        pdf_file = create_pdf_invoice(f"ماه {y}/{m}", rows, is_range=True)
+        pdf_file = create_pdf_invoice(f"{y}/{m}", rows, is_range=True)
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
@@ -403,7 +428,6 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
         )
         await query.delete_message()
 
-    # بازه زمانی (از تا)
     elif data.startswith("rep_rng_y:"):
         y = data.split(":")[1]
         await query.edit_message_text("ماه را انتخاب کنید:", reply_markup=make_months_keyboard("rep_rng", y))
@@ -425,7 +449,7 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
                 await query.edit_message_text(f"هیچ هزینه‌ای بین {start_d} تا {end_d} ثبت نشده است.")
                 return
             await query.edit_message_text("در حال آماده‌سازی فاکتور بازه زمانی دلخواه ... ⏳")
-            pdf_file = create_pdf_invoice(f"از {start_d} تا {end_d}", rows, is_range=True)
+            pdf_file = create_pdf_invoice(f"{start_d} تا {end_d}", rows, is_range=True)
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=pdf_file,
@@ -482,7 +506,6 @@ async def show_day_items_for_deletion(query, date_str):
         btn_text = f"❌ حذف: {title} ({amount:,})"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"del_item:{tx_id}:{date_str}")])
 
-    # دکمه پاک کردن کل روز
     buttons.append([InlineKeyboardButton("🔥 حذف کامل تمام هزینه‌های این روز", callback_data=f"del_all:{date_str}")])
     
     await query.edit_message_text(
@@ -521,7 +544,6 @@ def main():
     init_db()
     ensure_font()
     
-    # اجرای وب‌سرور برای پینگ UptimeRobot
     threading.Thread(target=run_web_server, daemon=True).start()
 
     application = Application.builder().token(TOKEN).build()
@@ -538,22 +560,18 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
     
-    # کلیدهای ثبت هزینه
     application.add_handler(CallbackQueryHandler(handle_add_date_buttons, pattern='^add_date_'))
     application.add_handler(CallbackQueryHandler(handle_add_calendar, pattern='^add_cal_'))
     
-    # فاکتورها (PDF)
     application.add_handler(MessageHandler(filters.Regex('^🧾 دریافت فاکتورها \\(PDF\\)$'), report_menu))
     application.add_handler(CallbackQueryHandler(handle_reports, pattern='^rep_'))
     application.add_handler(CallbackQueryHandler(handle_report_calendar, pattern='^rep_(day|mon|rng)_'))
     
-    # مدیریت و حذف
     application.add_handler(MessageHandler(filters.Regex('^🗑 مدیریت و حذف هزینه‌ها$'), delete_menu))
     application.add_handler(CallbackQueryHandler(handle_delete_selection, pattern='^del_check_'))
     application.add_handler(CallbackQueryHandler(handle_delete_calendar, pattern='^del_cal_'))
     application.add_handler(CallbackQueryHandler(handle_deletion_action, pattern='^del_(item|all):'))
 
-    # ثبت سریع با خط فاصله
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fast_track))
 
     application.run_polling()
