@@ -1,7 +1,6 @@
 import os
 import re
 import threading
-import urllib.request
 import psycopg2
 import jdatetime
 from io import BytesIO
@@ -21,38 +20,14 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DB_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-FONT_FILE = "Sahel.ttf"
-
-def ensure_font():
-    """دانلود فونت پایدار و بدون نقص ساحل با لینک‌های پشتیبان چندگانه"""
-    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 30000:
-        return
-
-    urls = [
-        "https://raw.githubusercontent.com/rastikerdar/sahel-font/master/dist/Sahel.ttf",
-        "https://raw.githubusercontent.com/persian-computing/vazir-font/master/dist/Vazir.ttf",
-        "https://raw.githubusercontent.com/BaseMax/invoice-image-generator/main/Vazirmatn-Regular.ttf"
-    ]
-    
-    for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = resp.read()
-                if len(data) > 30000:
-                    with open(FONT_FILE, 'wb') as f:
-                        f.write(data)
-                    print(f"Font successfully downloaded from {url}")
-                    return
-        except Exception as e:
-            print(f"Failed to download from {url}: {e}")
+# نام دقیق فایل فونت آپلود شده در گیت‌هاب
+FONT_FILE = "font.ttf"
 
 def fix_text(text):
-    """پردازش استاندارد و بدون تداخل حروف فارسی"""
+    """پردازش تمیز متن‌های فارسی"""
     if not text:
         return ""
     s = str(text).strip().replace('\u200c', ' ')
-    # فقط در صورت وجود حروف فارسی پردازش شود
     if re.search(r'[\u0600-\u06FF]', s):
         reshaped = arabic_reshaper.reshape(s)
         return get_display(reshaped)
@@ -196,29 +171,25 @@ def make_days_keyboard(action_prefix, year, month):
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-# ================= موتور رسم فاکتور PDF (کاملاً اصلاح‌شده) =================
+# ================= موتور رسم فاکتور PDF =================
 def create_pdf_invoice(title_header, items, is_range=False):
+    if not os.path.exists(FONT_FILE):
+        return None  # هشدار به نبود فایل فونت
+
     page_width, page_height = 1240, 1754
     image = Image.new('RGB', (page_width, page_height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
     
-    ensure_font()
-    
-    try:
-        font_large = ImageFont.truetype(FONT_FILE, 38)
-        font_bold = ImageFont.truetype(FONT_FILE, 26)
-        font_regular = ImageFont.truetype(FONT_FILE, 22)
-    except:
-        font_large = ImageFont.load_default()
-        font_bold = ImageFont.load_default()
-        font_regular = ImageFont.load_default()
+    font_large = ImageFont.truetype(FONT_FILE, 40)
+    font_bold = ImageFont.truetype(FONT_FILE, 26)
+    font_regular = ImageFont.truetype(FONT_FILE, 22)
 
     # سربرگ سرمه‌ای
     draw.rectangle([(60, 50), (1180, 160)], fill=(30, 41, 59))
     draw.text((page_width / 2, 90), fix_text("صورت حساب هزینه ها"), fill=(255, 255, 255), font=font_large, anchor="mm")
     
     # کادر تاریخ بازه گزارش
-    draw.text((1140, 200), fix_text("بازه گزارش:"), fill=(70, 70, 70), font=font_bold, anchor="rt")
+    draw.text((1140, 200), fix_text("بازه فاکتور:"), fill=(70, 70, 70), font=font_bold, anchor="rt")
     draw.text((950, 200), str(title_header), fill=(30, 41, 59), font=font_bold, anchor="lt")
     
     # سربرگ جدول
@@ -287,7 +258,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ['🗑 مدیریت و حذف هزینه‌ها']
     ]
     markup = ReplyKeyboardMarkup(menu, resize_keyboard=True)
-    await update.message.reply_text("سلام رئیس! سیستم با رفع مشکل فونت و نمایش دقیق فارسی آماده به کار است.", reply_markup=markup)
+    await update.message.reply_text("سلام رئیس! سیستم با استفاده از فایل مستقیم فونت آماده به کار است.", reply_markup=markup)
 
 # --- ثبت مرحله‌ای ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -389,6 +360,11 @@ async def send_date_pdf(query, context, date_str):
         return
     await query.edit_message_text("در حال آماده‌سازی فایل PDF ... ⏳")
     pdf_file = create_pdf_invoice(f"{date_str}", rows, is_range=False)
+    
+    if pdf_file is None:
+        await query.edit_message_text("❌ خطا: فایل font.ttf در گیت‌هاب پیدا نشد! لطفاً فایل فونت را آپلود کنید.")
+        return
+
     await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=pdf_file,
@@ -423,6 +399,11 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
             return
         await query.edit_message_text("در حال رسم و ساخت فاکتور ماهانه PDF ... ⏳")
         pdf_file = create_pdf_invoice(f"{y}/{m}", rows, is_range=True)
+        
+        if pdf_file is None:
+            await query.edit_message_text("❌ خطا: فایل font.ttf در گیت‌هاب پیدا نشد! لطفاً فایل فونت را آپلود کنید.")
+            return
+
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=pdf_file,
@@ -453,6 +434,11 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
                 return
             await query.edit_message_text("در حال آماده‌سازی فاکتور بازه زمانی دلخواه ... ⏳")
             pdf_file = create_pdf_invoice(f"{start_d} تا {end_d}", rows, is_range=True)
+            
+            if pdf_file is None:
+                await query.edit_message_text("❌ خطا: فایل font.ttf در گیت‌هاب پیدا نشد! لطفاً فایل فونت را آپلود کنید.")
+                return
+
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=pdf_file,
@@ -545,7 +531,6 @@ async def fast_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= اجرای برنامه =================
 def main():
     init_db()
-    ensure_font()
     
     threading.Thread(target=run_web_server, daemon=True).start()
 
