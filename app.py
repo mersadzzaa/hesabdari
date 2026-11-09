@@ -21,41 +21,42 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DB_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-FONT_PATH = "Vazirmatn-Regular.ttf"
+FONT_FILE = "Sahel.ttf"
 
 def ensure_font():
-    """دانلود فونت استاندارد با بررسی سلامت کامل فایل و جلوگیری از دانلود ناقص"""
-    if not os.path.exists(FONT_PATH) or os.path.getsize(FONT_PATH) < 20000:
-        url = "https://raw.githubusercontent.com/rastikerdar/vazirmatn/master/fonts/ttf/Vazirmatn-Regular.ttf"
-        try:
-            req = urllib.request.Request(
-                url, 
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-            )
-            with urllib.request.urlopen(req) as resp, open(FONT_PATH, 'wb') as f:
-                f.write(resp.read())
-        except Exception as e:
-            print(f"Error downloading font: {e}")
+    """دانلود فونت پایدار و بدون نقص ساحل با لینک‌های پشتیبان چندگانه"""
+    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 30000:
+        return
 
-# پیکربندی حرفه‌ای موتور تغییر شکل حروف فارسی
-reshaper = arabic_reshaper.ArabicReshaper(
-    configuration={
-        'delete_harakat': False,
-        'support_ligatures': True,
-        'support_zwj': True,
-        'use_unshaped_instead_of_isolated': True
-    }
-)
+    urls = [
+        "https://raw.githubusercontent.com/rastikerdar/sahel-font/master/dist/Sahel.ttf",
+        "https://raw.githubusercontent.com/persian-computing/vazir-font/master/dist/Vazir.ttf",
+        "https://raw.githubusercontent.com/BaseMax/invoice-image-generator/main/Vazirmatn-Regular.ttf"
+    ]
+    
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+                if len(data) > 30000:
+                    with open(FONT_FILE, 'wb') as f:
+                        f.write(data)
+                    print(f"Font successfully downloaded from {url}")
+                    return
+        except Exception as e:
+            print(f"Failed to download from {url}: {e}")
 
 def fix_text(text):
-    """اصلاح جهت و اتصال حروف فارسی بدون به‌هم‌ریختگی"""
+    """پردازش استاندارد و بدون تداخل حروف فارسی"""
     if not text:
         return ""
-    # رفع مشکل نیم‌فاصله‌ها و کاراکترهای ناسازگار
-    cleaned = str(text).replace('\u200c', ' ').strip()
-    reshaped = reshaper.reshape(cleaned)
-    # جهت‌دهی قطعی راست‌به‌چپ (RTL)
-    return get_display(reshaped, base_dir='R')
+    s = str(text).strip().replace('\u200c', ' ')
+    # فقط در صورت وجود حروف فارسی پردازش شود
+    if re.search(r'[\u0600-\u06FF]', s):
+        reshaped = arabic_reshaper.reshape(s)
+        return get_display(reshaped)
+    return s
 
 # ================= سرور زنده نگه‌دارنده =================
 web_app = Flask(__name__)
@@ -195,37 +196,41 @@ def make_days_keyboard(action_prefix, year, month):
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-# ================= موتور ساخت فاکتور PDF (کاملاً اصلاح‌شده) =================
+# ================= موتور رسم فاکتور PDF (کاملاً اصلاح‌شده) =================
 def create_pdf_invoice(title_header, items, is_range=False):
     page_width, page_height = 1240, 1754
     image = Image.new('RGB', (page_width, page_height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
     
     ensure_font()
-    font_large = ImageFont.truetype(FONT_PATH, 42)
-    font_bold = ImageFont.truetype(FONT_PATH, 28)
-    font_regular = ImageFont.truetype(FONT_PATH, 24)
+    
+    try:
+        font_large = ImageFont.truetype(FONT_FILE, 38)
+        font_bold = ImageFont.truetype(FONT_FILE, 26)
+        font_regular = ImageFont.truetype(FONT_FILE, 22)
+    except:
+        font_large = ImageFont.load_default()
+        font_bold = ImageFont.load_default()
+        font_regular = ImageFont.load_default()
 
     # سربرگ سرمه‌ای
     draw.rectangle([(60, 50), (1180, 160)], fill=(30, 41, 59))
-    draw.text((page_width / 2, 85), fix_text("صورت حساب هزینه ها"), fill=(255, 255, 255), font=font_large, anchor="mm")
+    draw.text((page_width / 2, 90), fix_text("صورت حساب هزینه ها"), fill=(255, 255, 255), font=font_large, anchor="mm")
     
-    # کادر تاریخ/گزارش (جدا کردن متن فارسی از تاریخ برای جلوگیری از به‌هم‌ریختگی)
-    report_label = fix_text("بازه گزارش:")
-    draw.text((1140, 200), report_label, fill=(70, 70, 70), font=font_bold, anchor="rt")
-    # چاپ تاریخ بدون وارونه شدن اسلش‌ها
+    # کادر تاریخ بازه گزارش
+    draw.text((1140, 200), fix_text("بازه گزارش:"), fill=(70, 70, 70), font=font_bold, anchor="rt")
     draw.text((950, 200), str(title_header), fill=(30, 41, 59), font=font_bold, anchor="lt")
     
     # سربرگ جدول
     draw.rectangle([(60, 260), (1180, 320)], fill=(226, 232, 240))
     draw.text((1140, 278), fix_text("ردیف"), fill=(15, 23, 42), font=font_bold, anchor="rt")
-    draw.text((950, 278), fix_text("شرح کالا و خدمات"), fill=(15, 23, 42), font=font_bold, anchor="rt")
+    draw.text((980, 278), fix_text("شرح کالا و خدمات"), fill=(15, 23, 42), font=font_bold, anchor="rt")
     if is_range:
         draw.text((550, 278), fix_text("تاریخ"), fill=(15, 23, 42), font=font_bold, anchor="rt")
     draw.text((100, 278), fix_text("مبلغ (تومان)"), fill=(15, 23, 42), font=font_bold, anchor="lt")
 
     # سطرهای جدول
-    y = 345
+    y = 350
     total_amount = 0
     for idx, item in enumerate(items):
         if is_range:
@@ -234,7 +239,7 @@ def create_pdf_invoice(title_header, items, is_range=False):
             _, title, amount = item
             date_val = ""
 
-        # رنگ سطر یک‌درمیان
+        # رنگ پس‌زمینه یک‌درمیان
         if idx % 2 == 1:
             draw.rectangle([(60, y - 10), (1180, y + 45)], fill=(248, 250, 252))
 
@@ -242,33 +247,31 @@ def create_pdf_invoice(title_header, items, is_range=False):
         draw.text((1130, y), str(idx + 1), fill=(70, 70, 70), font=font_regular, anchor="rt")
         
         # شرح کالا
-        draw.text((950, y), fix_text(title), fill=(30, 30, 30), font=font_regular, anchor="rt")
+        draw.text((980, y), fix_text(title), fill=(30, 30, 30), font=font_regular, anchor="rt")
         
-        # تاریخ (فقط برای بازه‌ها)
+        # تاریخ (فقط برای فاکتورهای بازه زمانی)
         if is_range:
-            draw.text((520, y), str(date_val), fill=(70, 70, 70), font=font_regular, anchor="rt")
+            draw.text((550, y), str(date_val), fill=(70, 70, 70), font=font_regular, anchor="rt")
             
         # مبلغ
         draw.text((100, y), f"{amount:,}", fill=(16, 120, 50), font=font_bold, anchor="lt")
 
         total_amount += amount
-        y += 55
+        y += 58
         if y > 1550:
             break
 
-    # خط پایان جدول و جمع کل
+    # کادر جمع کل
     draw.line([(60, y + 20), (1180, y + 20)], fill=(148, 163, 184), width=2)
     y += 50
     draw.rectangle([(60, y), (1180, y + 80)], fill=(241, 245, 249))
     
     draw.text((1140, y + 25), fix_text("جمع کل هزینه ها:"), fill=(15, 23, 42), font=font_bold, anchor="rt")
     
-    # مبلغ نهایی با واحد تومان
     total_str = f"{total_amount:,} "
     draw.text((100, y + 25), total_str, fill=(185, 28, 28), font=font_large, anchor="lt")
-    draw.text((100 + draw.textlength(total_str, font=font_large) + 10, y + 33), fix_text("تومان"), fill=(185, 28, 28), font=font_bold, anchor="lt")
+    draw.text((100 + draw.textlength(total_str, font=font_large) + 10, y + 32), fix_text("تومان"), fill=(185, 28, 28), font=font_bold, anchor="lt")
 
-    # ذخیره با کیفیت بسیار بالا به صورت PDF
     pdf_buffer = BytesIO()
     image.save(pdf_buffer, format="PDF", resolution=150.0)
     pdf_buffer.seek(0)
@@ -284,9 +287,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ['🗑 مدیریت و حذف هزینه‌ها']
     ]
     markup = ReplyKeyboardMarkup(menu, resize_keyboard=True)
-    await update.message.reply_text("سلام رئیس! سیستم با فرمت PDF و تقویم هوشمند آماده به کار است.", reply_markup=markup)
+    await update.message.reply_text("سلام رئیس! سیستم با رفع مشکل فونت و نمایش دقیق فارسی آماده به کار است.", reply_markup=markup)
 
-# --- ثبت هزینه مرحله‌ای ---
+# --- ثبت مرحله‌ای ---
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     await update.message.reply_text("عنوان خرید یا هزینه را بنویسید (مثلاً: بنزین):")
@@ -300,7 +303,7 @@ async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = update.message.text.replace(',', '').strip()
     if not val.isdigit():
-        await update.message.reply_text("لطفاً فقط عدد انگلیسی یا فارسی بدون حروف بنویسید:")
+        await update.message.reply_text("لطفاً فقط عدد بنویسید:")
         return AMOUNT
 
     context.user_data['temp_amount'] = int(val)
@@ -350,7 +353,7 @@ def finalize_add(update, context, date_str):
     amount = context.user_data.get('temp_amount', 0)
     add_transaction(title, amount, date_str)
 
-# --- منوی دریافت فاکتورها (PDF) ---
+# --- منوی فاکتورها (PDF) ---
 async def report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     buttons = [
@@ -527,7 +530,7 @@ async def handle_deletion_action(update: Update, context: ContextTypes.DEFAULT_T
         delete_day_txs(date_str)
         await query.edit_message_text(f"🗑 تمام هزینه‌های تاریخ {date_str} به طور کامل پاک شدند.")
 
-# --- ثبت سریع (Fast Track) ---
+# --- ثبت سریع ---
 async def fast_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     text = update.message.text
