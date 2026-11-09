@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import logging
 import threading
 import psycopg2
 import jdatetime
@@ -8,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, 
     ContextTypes, ConversationHandler, CallbackQueryHandler
@@ -15,13 +17,16 @@ from telegram.ext import (
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
+# تنظیم لاگ‌ها برای ثبت خطاهای شبکه
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+
 # ================= تنظیمات اولیه =================
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DB_URL = os.environ.get("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-# اختلاف زمانی ثابت تهران (ایران ساعت تابستانی ندارد: +03:30)
+# اختلاف زمانی دقیق و ثابت تهران (+03:30)
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 # ================= سرور زنده نگه‌دارنده =================
@@ -114,7 +119,6 @@ def delete_day_txs(date_str):
 
 # ================= توابع تاریخ دقیق تهران =================
 def get_tehran_date():
-    """محاسبه دقیق تاریخ بر مبنای ساعت رسمی ایران"""
     now_tehran = datetime.now(TEHRAN_TZ)
     return jdatetime.date.fromgregorian(date=now_tehran.date())
 
@@ -268,7 +272,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     context.user_data.clear()
     await update.message.reply_text(
-        "سلام رئیس! سیستم با تاریخ دقیق ساعت تهران و دکمه‌های انصراف سریع آماده به کار است.",
+        "سلام رئیس! سیستم با تنظیمات شبکه بهینه و مهلت اتصال ۳۰ ثانیه‌ای آماده به کار است.",
         reply_markup=get_main_keyboard()
     )
 
@@ -613,14 +617,12 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_user.id != ADMIN_ID: return
     text = update.message.text.strip()
 
-    # انصراف سریع با ارسال متن یا زدن دکمه کیبورد
     if text in ["❌ انصراف / منوی اصلی", "انصراف", "منوی اصلی", "/cancel"]:
         await cancel_all(update, context)
         return
 
     flow = context.user_data.get('flow')
 
-    # ۱. دریافت عنوان برای روز خاص
     if flow == 'AWAIT_SPECIFIC_TITLE':
         context.user_data['specific_title'] = text
         context.user_data['flow'] = 'AWAIT_SPECIFIC_AMOUNT'
@@ -630,7 +632,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # ۲. دریافت مبلغ برای روز خاص
     elif flow == 'AWAIT_SPECIFIC_AMOUNT':
         val = text.replace(',', '')
         if not val.isdigit():
@@ -654,7 +655,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # ۳. ثبت سریع (Fast Track)
     match = re.match(r'^(.*?)\s*-\s*([\d,]+)$', text)
     if match:
         title = match.group(1).strip()
@@ -663,13 +663,25 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         add_transaction(title, amount, date_str)
         await update.message.reply_text(f"⚡️ سریع ثبت شد!\n🛒 {title}\n💰 {format_price(amount)}\n📅 امروز ({date_str})")
 
+# --- کنترل‌کننده خطاهای شبکه ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.warning(f"Network / Telegram timeout handled gracefully: {context.error}")
+
 # ================= اجرای برنامه =================
 def main():
     init_db()
     
     threading.Thread(target=run_web_server, daemon=True).start()
 
-    application = Application.builder().token(TOKEN).build()
+    # افزایش تایم‌اوت ارتباط با تلگرام به ۳۰ ثانیه برای جلوگیری از TimedOut
+    request_config = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0
+    )
+
+    application = Application.builder().token(TOKEN).request(request_config).build()
 
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📝 ثبت هزینه$'), start_add)],
@@ -688,32 +700,29 @@ def main():
     application.add_handler(CommandHandler("cancel", cancel_all))
     application.add_handler(conv_handler)
     
-    # دکمه انصراف کلی برای تمام منوهای شیشه‌ای
     application.add_handler(CallbackQueryHandler(cancel_all, pattern='^cancel_to_main$'))
 
-    # ثبت عادی تقویم
     application.add_handler(CallbackQueryHandler(handle_add_date_buttons, pattern='^add_date_'))
     application.add_handler(CallbackQueryHandler(handle_add_calendar, pattern='^add_cal_'))
     
-    # اضافه کردن به روز خاص
     application.add_handler(MessageHandler(filters.Regex('^➕ اضافه کردن به روز خاص$'), add_to_specific_date_menu))
     application.add_handler(CallbackQueryHandler(handle_add_target_selection, pattern='^add_tgt_(today|yesterday|custom)$'))
     application.add_handler(CallbackQueryHandler(handle_add_target_calendar, pattern='^add_tgt_cal_'))
     
-    # فاکتورها
     application.add_handler(MessageHandler(filters.Regex('^🧾 دریافت فاکتورها$'), report_menu))
     application.add_handler(CallbackQueryHandler(handle_reports, pattern='^rep_(today|yesterday|month_start|day_start|range_start)$'))
     application.add_handler(CallbackQueryHandler(handle_report_calendar, pattern='^rep_(day|mon|rng)_'))
     application.add_handler(CallbackQueryHandler(handle_excel_download, pattern='^xl_'))
     
-    # مدیریت و حذف
     application.add_handler(MessageHandler(filters.Regex('^🗑 مدیریت و حذف هزینه‌ها$'), delete_menu))
     application.add_handler(CallbackQueryHandler(handle_delete_selection, pattern='^del_check_'))
     application.add_handler(CallbackQueryHandler(handle_delete_calendar, pattern='^del_cal_'))
     application.add_handler(CallbackQueryHandler(handle_deletion_action, pattern='^del_(item|all):'))
 
-    # پیام‌های متنی
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, general_text_router))
+
+    # ثبت هندلر خطا
+    application.add_error_handler(error_handler)
 
     application.run_polling()
 
