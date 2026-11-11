@@ -151,7 +151,6 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(menu, resize_keyboard=True)
 
-# جلوگیری از خطای کلیک مجدد روی دکمه‌ها
 async def safe_edit_message(query, text, reply_markup=None, parse_mode=None):
     try:
         await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -205,7 +204,6 @@ def make_days_keyboard(action_prefix, year, month):
     rows.append([InlineKeyboardButton("❌ انصراف و منوی اصلی", callback_data="cancel_to_main")])
     return InlineKeyboardMarkup(rows)
 
-# کیبوردهای اختصاصی پایان بازه (بدون نیاز به ذخیره حافظه موقت)
 def make_range_end_years_keyboard(start_date):
     years = [1402, 1403, 1404, 1405, 1406, 1407, 1408, 1409, 1410]
     rows = []
@@ -248,32 +246,6 @@ def make_range_end_days_keyboard(start_date, year, month):
     return InlineKeyboardMarkup(rows)
 
 # ================= موتور ساخت فاکتور و اکسل =================
-def generate_text_invoice(title_header, items, is_range=False):
-    lines = [
-        "🧾 <b>صورت‌حساب هزینه‌ها</b>",
-        f"📅 <b>بازه:</b> <code>{title_header}</code>",
-        "────────────────────"
-    ]
-    total = 0
-    for idx, item in enumerate(items, 1):
-        if is_range:
-            _, title, amount, d_val = item
-            lines.append(f"<b>{idx}. {html.escape(title)}</b>")
-            lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان")
-            lines.append(f"   ▫️ تاریخ: <code>{d_val}</code>")
-        else:
-            _, title, amount = item
-            lines.append(f"<b>{idx}. {html.escape(title)}</b>")
-            lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان")
-        
-        total += amount
-        lines.append("")
-
-    lines.append("────────────────────")
-    lines.append(f"📊 <b>تعداد اقلام:</b> {len(items)}")
-    lines.append(f"💵 <b>جمع کل:</b> <b>{total:,} تومان</b>")
-    return "\n".join(lines)
-
 def generate_excel_file(title_header, items, is_range=False):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -333,7 +305,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     context.user_data.clear()
     await update.message.reply_text(
-        "سلام رئیس! سیستم با رفع نقص بازه زمانی و قابلیت جست‌وجو آماده به کار است.",
+        "سلام رئیس! سیستم با رفع محدودیت حجم فاکتورهای طولانی آماده به کار است.",
         reply_markup=get_main_keyboard()
     )
 
@@ -489,28 +461,77 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "rep_today":
-        await show_date_report(query, get_today())
+        await show_date_report(query, context, get_today())
     elif data == "rep_yesterday":
-        await show_date_report(query, get_yesterday())
+        await show_date_report(query, context, get_yesterday())
     elif data == "rep_day_start":
         await safe_edit_message(query, "سال روز مورد نظر را انتخاب کنید:", reply_markup=make_years_keyboard("rep_day"))
     elif data == "rep_month_start":
         await safe_edit_message(query, "سال ماه مورد نظر را انتخاب کنید:", reply_markup=make_years_keyboard("rep_mon"))
     elif data == "rep_range_start":
-        # شروع جریان بدون باگ بازه زمانی (مستقل از حافظه رم)
         await safe_edit_message(query, "انتخاب «تاریخ شروع» بازه:\nسال را مشخص کنید:", reply_markup=make_years_keyboard("rng_s"))
 
-async def show_date_report(query, date_str):
-    rows = get_tx_by_date(date_str)
+# ارسال فاکتور با سیستم چندبخشی هوشمند (جلوگیری قطعی از خطای محدودیت تلگرام)
+async def send_smart_report(query, context, title_header, rows, excel_cb, is_range=False):
     if not rows:
-        await safe_edit_message(query, f"در تاریخ {date_str} هیچ هزینه‌ای ثبت نشده است.")
+        await safe_edit_message(query, f"هیچ هزینه‌ای برای {title_header} ثبت نشده است.")
         return
-    text = generate_text_invoice(date_str, rows, is_range=False)
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_day:{date_str}")],
-        [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
-    ])
-    await safe_edit_message(query, text, parse_mode="HTML", reply_markup=markup)
+
+    BATCH_SIZE = 15  # هر پیام شامل ۱۵ تراکنش برای تضمین عدم عبور از ۴۰۹۶ کاراکتر
+    total_items = len(rows)
+    total_amount = sum(r[2] for r in rows)
+    chat_id = query.message.chat_id
+
+    # ساخت دسته‌ها
+    batches = [rows[i:i + BATCH_SIZE] for i in range(0, total_items, BATCH_SIZE)]
+    num_batches = len(batches)
+
+    for b_idx, batch in enumerate(batches, 1):
+        lines = []
+        if b_idx == 1:
+            lines.append("🧾 <b>صورت‌حساب هزینه‌ها</b>")
+            lines.append(f"📅 <b>بازه:</b> <code>{title_header}</code>")
+            if num_batches > 1:
+                lines.append(f"<i>(بخش ۱ از {num_batches})</i>")
+            lines.append("────────────────────")
+        else:
+            lines.append(f"🧾 <b>ادامه صورت‌حساب (بخش {b_idx} از {num_batches})</b>")
+            lines.append("────────────────────")
+
+        start_num = (b_idx - 1) * BATCH_SIZE + 1
+        for idx, item in enumerate(batch, start_num):
+            if is_range:
+                _, title, amount, d_val = item
+                lines.append(f"<b>{idx}. {html.escape(title)}</b>")
+                lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان  |  🗓 <code>{d_val}</code>")
+            else:
+                _, title, amount = item
+                lines.append(f"<b>{idx}. {html.escape(title)}</b>")
+                lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان")
+            lines.append("")
+
+        # فقط در بخش آخر، جمع کل و دکمه دانلود اکسل درج شود
+        if b_idx == num_batches:
+            lines.append("────────────────────")
+            lines.append(f"📊 <b>تعداد کل اقلام:</b> {total_items}")
+            lines.append(f"💵 <b>جمع کل هزینه‌ها:</b> <b>{total_amount:,} تومان</b>")
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=excel_cb)],
+                [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
+            ])
+        else:
+            markup = None
+
+        text_content = "\n".join(lines)
+
+        if b_idx == 1:
+            await safe_edit_message(query, text_content, reply_markup=markup, parse_mode="HTML")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=text_content, reply_markup=markup, parse_mode="HTML")
+
+async def show_date_report(query, context, date_str):
+    rows = get_tx_by_date(date_str)
+    await send_smart_report(query, context, date_str, rows, f"xl_day:{date_str}", is_range=False)
 
 async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -525,7 +546,7 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
         await safe_edit_message(query, f"ماه انتخاب شد. روز را انتخاب کنید:", reply_markup=make_days_keyboard("rep_day", y, m))
     elif data.startswith("rep_day_d:"):
         _, y, m, d = data.split(":")
-        await show_date_report(query, f"{y}/{m}/{d}")
+        await show_date_report(query, context, f"{y}/{m}/{d}")
 
     elif data.startswith("rep_mon_y:"):
         y = data.split(":")[1]
@@ -533,23 +554,14 @@ async def handle_report_calendar(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("rep_mon_m:"):
         _, y, m = data.split(":")
         rows = get_tx_by_month(y, m)
-        if not rows:
-            await safe_edit_message(query, f"در ماه {y}/{m} هیچ خریدی ثبت نشده است.")
-            return
-        text = generate_text_invoice(f"ماه {y}/{m}", rows, is_range=True)
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_mon:{y}:{m}")],
-            [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
-        ])
-        await safe_edit_message(query, text, parse_mode="HTML", reply_markup=markup)
+        await send_smart_report(query, context, f"ماه {y}/{m}", rows, f"xl_mon:{y}:{m}", is_range=True)
 
-# --- سیستم بازنویسی‌شده و ۱۰۰٪ پایدار بازه زمانی ---
+# --- سیستم بازه زمانی با تضمین عدم پرش و عدم کرش ---
 async def handle_range_stateless_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # ۱. مراحل تاریخ شروع
     if data.startswith("rng_s_y:"):
         y = data.split(":")[1]
         await safe_edit_message(query, f"تاریخ شروع | سال {y} انتخاب شد. ماه را مشخص کنید:", reply_markup=make_months_keyboard("rng_s", y))
@@ -566,7 +578,6 @@ async def handle_range_stateless_calendar(update: Update, context: ContextTypes.
             reply_markup=make_range_end_years_keyboard(start_date)
         )
 
-    # ۲. مراحل تاریخ پایان (حمل تاریخ شروع در خودِ کلید دکمه)
     elif data.startswith("rng_ey:"):
         _, start_date, y = data.split(":")
         await safe_edit_message(query, f"تاریخ پایان | سال {y} انتخاب شد. ماه را مشخص کنید:", reply_markup=make_range_end_months_keyboard(start_date, y))
@@ -577,21 +588,18 @@ async def handle_range_stateless_calendar(update: Update, context: ContextTypes.
         _, start_date, y, m, d = data.split(":")
         end_date = f"{y}/{m}/{d}"
 
-        # مرتب‌سازی هوشمند در صورت انتخاب برعکس
         if start_date > end_date:
             start_date, end_date = end_date, start_date
 
         rows = get_tx_by_range(start_date, end_date)
-        if not rows:
-            await safe_edit_message(query, f"هیچ هزینه‌ای بین {start_date} تا {end_date} ثبت نشده است.")
-            return
-
-        text = generate_text_invoice(f"از {start_date} تا {end_date}", rows, is_range=True)
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 دانلود فایل اکسل (Excel)", callback_data=f"xl_rng:{start_date}:{end_date}")],
-            [InlineKeyboardButton("❌ بازگشت به منوی اصلی", callback_data="cancel_to_main")]
-        ])
-        await safe_edit_message(query, text, parse_mode="HTML", reply_markup=markup)
+        await send_smart_report(
+            query, 
+            context, 
+            f"از {start_date} تا {end_date}", 
+            rows, 
+            f"xl_rng:{start_date}:{end_date}", 
+            is_range=True
+        )
 
 # --- دانلود فایل اکسل ---
 async def handle_excel_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,7 +710,7 @@ async def handle_deletion_action(update: Update, context: ContextTypes.DEFAULT_T
         delete_day_txs(date_str)
         await safe_edit_message(query, f"🗑 تمام هزینه‌های تاریخ {date_str} به طور کامل پاک شدند.")
 
-# --- سیستم جدید: جست‌وجوی خریدها ---
+# --- بخش جست‌وجوی خریدها ---
 async def search_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     context.user_data.clear()
@@ -727,7 +735,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     flow = context.user_data.get('flow')
 
-    # پردازش کلمه جستجو
     if flow == 'AWAIT_SEARCH_QUERY':
         context.user_data.clear()
         rows = search_transactions(text)
@@ -747,8 +754,7 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         for idx, item in enumerate(rows, 1):
             _, title, amount, d_val = item
             lines.append(f"<b>{idx}. {html.escape(title)}</b>")
-            lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان")
-            lines.append(f"   ▫️ تاریخ: <code>{d_val}</code>")
+            lines.append(f"   ▫️ مبلغ: <code>{amount:,}</code> تومان  |  🗓 <code>{d_val}</code>")
             total += amount
             lines.append("")
 
@@ -763,7 +769,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=markup)
         return
 
-    # دریافت عنوان برای ثبت در روز خاص
     if flow == 'AWAIT_SPECIFIC_TITLE':
         context.user_data['specific_title'] = text
         context.user_data['flow'] = 'AWAIT_SPECIFIC_AMOUNT'
@@ -773,7 +778,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # دریافت مبلغ برای ثبت در روز خاص
     elif flow == 'AWAIT_SPECIFIC_AMOUNT':
         val = text.replace(',', '')
         if not val.isdigit():
@@ -797,7 +801,6 @@ async def general_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # ثبت سریع
     match = re.match(r'^(.*?)\s*-\s*([\d,]+)$', text)
     if match:
         title = match.group(1).strip()
@@ -855,7 +858,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_reports, pattern='^rep_(today|yesterday|month_start|day_start|range_start)$'))
     application.add_handler(CallbackQueryHandler(handle_report_calendar, pattern='^rep_(day|mon)_'))
     
-    # هندلر مستقل و پایدار بازه زمانی
+    # بازه زمانی هوشمند و چندبخشی
     application.add_handler(CallbackQueryHandler(handle_range_stateless_calendar, pattern='^rng_'))
     
     # دانلود اکسل
@@ -867,10 +870,9 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_delete_calendar, pattern='^del_cal_'))
     application.add_handler(CallbackQueryHandler(handle_deletion_action, pattern='^del_(item|all):'))
 
-    # بخش جست‌وجوی خریدها
+    # جست‌وجو
     application.add_handler(MessageHandler(filters.Regex('^🔍 جست‌وجوی خریدها$'), search_menu))
 
-    # پیام‌های متنی
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, general_text_router))
 
     application.add_error_handler(error_handler)
